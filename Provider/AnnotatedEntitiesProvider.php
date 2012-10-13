@@ -93,7 +93,7 @@ class AnnotatedEntitiesProvider implements DoctrineEntityProvider
                 foreach($entities as $entity)
                 {
                     $finalEntities[] = $entity;
-                }                
+                }
             }
         }
 
