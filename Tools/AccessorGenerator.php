@@ -281,7 +281,7 @@ trait <traitName>
 
             //create the methods (setters and getters only)
             foreach($settings['validAccessors'] as $accessorType) {
-                $code = $this->generateAccessorMethod($metadata, $accessorType, $fieldMapping['fieldName'], $fieldMapping['type']);
+                $code = $this->generateAccessorMethod($metadata, $accessorType, $fieldMapping['fieldName'], $fieldMapping['type'], null, $settings['publicName']);
 
                 if($code) { $methods[] = $code; }
             }
@@ -317,7 +317,8 @@ trait <traitName>
 
                 $code = $this->generateAccessorMethod(
                             $metadata, $accessorType, $associationMapping['fieldName'],
-                            $thisTypeHint, ($nullable ? 'null' : null), $settings['singular'], $otherSideMethodEnding);
+                            $thisTypeHint, ($nullable ? 'null' : null), $settings['publicName'],
+                            $settings['singular'], $otherSideMethodEnding);
 
                 if($code) { $methods[] = $code; }
             }
@@ -333,14 +334,14 @@ trait <traitName>
         return $methodDeps.$methods;
     }
 
-    protected function generateAccessorMethod(ClassMetadataInfo $metadata, $type, $fieldName, $typeHint = null, $defaultValue = null, $singular = null, $otherSideMethodEnding = null)
+    protected function generateAccessorMethod(ClassMetadataInfo $metadata, $type, $fieldName, $typeHint = null, $defaultValue = null, $publicName = null, $singular = null, $otherSideMethodEnding = null)
     {
         $useSingular = in_array($type, ["add", "remove"]);
 
         if ($useSingular) {
             $methodName = $type . Inflector::classify($singular);
         } else {
-            $methodName = $type . Inflector::classify($fieldName);
+            $methodName = $type . Inflector::classify($publicName);
         }
 
         //skip methods which already exist (here or on a parent) or properties that were defined on a parent
@@ -439,8 +440,14 @@ trait <traitName>
         $singular = (is_array($singular)) ? $singular[0] : $singular;
 
         $otherSideMethodEnding = ($fieldAnnotation!==null) ? $fieldAnnotation->otherSideMethodEnding : null;
+        $publicFieldName = ($fieldAnnotation!==null) ? $fieldAnnotation->publicName : $fieldName;
 
-        return ['singular'=>$singular,'validAccessors'=>$validAccessors, 'otherSideMethodEnding'=>$otherSideMethodEnding];
+        return [
+            'publicName' => $publicFieldName,
+            'validAccessors' => $validAccessors,
+            'singular' => $singular,
+            'otherSideMethodEnding' => $otherSideMethodEnding
+        ];
     }
 
     /**
