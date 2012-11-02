@@ -266,61 +266,34 @@ trait <traitName>
         $associationMappings = $metadata->associationMappings;
         $methods = array();
 
-        if ($metadata->isMappedSuperclass) {
+        if ($metadata->isMappedSuperclass)
+        {
             $mappings = $this->getMappingsForMappedSuperClass($metadata);
             $fieldMappings = $mappings['fieldMappings'];
             $associationMappings = $mappings['associationMappings'];
         }
 
-        //Find a class-level settings annotation, if present.
-        $classAnnotation = $this->reader->getClassAnnotation(new \ReflectionClass($metadata->name), $this->annotationClass);
-
-        foreach ($fieldMappings as $fieldMapping)
+        foreach (["field"=>$fieldMappings, "association"=>$associationMappings] as $mappingType=>$mappings)
         {
-            $settings = $this->getSettingsForField($fieldMapping, false, $metadata, $classAnnotation);
-
-            //create the methods (setters and getters only)
-            foreach($settings['validAccessors'] as $accessorType) {
-                $code = $this->generateAccessorMethod($metadata, $accessorType, $fieldMapping['fieldName'], $fieldMapping['type'], null, $settings['publicName']);
-
-                if($code) { $methods[] = $code; }
-            }
-        }
-
-        //keep a lookout for bidirectional, many-to-many associations as we go through our loop, as I have a
-        //trait written that handles those more neatly (keeping both sides in sync), in this flag will let our
-        //accessor trait use it.
-        $hasBiDirectionalManyToMany = false;
-
-        foreach ($associationMappings as $associationMapping)
-        {
-            $settings = $this->getSettingsForField($associationMapping, true, $metadata, $classAnnotation);
-
-            //can the field be set null? (which requires it not to be a collection)
-            $nullable = (($associationMapping['type'] & ClassMetadataInfo::TO_ONE) &&
-                          $this->isAssociationIsNullable($associationMapping));
-            $typeHint = $associationMapping['targetEntity'];
-
-            $otherSideMethodEnding = $settings['otherSideMethodEnding']; //used for the bi-directional many-to-many template
-
-            if($associationMapping['type']==ClassMetadataInfo::MANY_TO_MANY &&
-              (isset($associationMapping['mappedBy']) || isset($associationMapping['inversedBy'])))
+            foreach($mappings as $mapping)
             {
-                $hasBiDirectionalManyToMany = true;
-            }
+                $settings = $this->getSettingsForField($mapping, ($mappingType=='association'), $metadata);
 
-            foreach($settings['validAccessors'] as $accessorType)
-            {
-                //alter the type hint for collection getters to show that they return Doctrine Collections.
-                $thisTypeHint = (($accessorType=='get' || $accessorType=='set') && ($associationMapping['type'] & ClassMetadataInfo::TO_MANY)) ?
-                                'Doctrine\Common\Collections\Collection' : $typeHint;
+                //create the methods (setters and getters only)
+                foreach($settings['validAccessors'] as $accessorType)
+                {
+                    $methodName = $this->getMethodNameForField($accessorType, $settings['publicName'], $settings['singular']);
+                    $typeHint = (($accessorType=='get' || $accessorType=='set') && $settings['storesCollection']) ?
+                                'Doctrine\Common\Collections\Collection' : $settings['defaultTypeHint'];
 
-                $code = $this->generateAccessorMethod(
-                            $metadata, $accessorType, $associationMapping['fieldName'],
-                            $thisTypeHint, ($nullable ? 'null' : null), $settings['publicName'],
-                            $settings['singular'], $otherSideMethodEnding);
+                    $code = $this->generateAccessorMethod(
+                        $metadata, $accessorType, $methodName, $mapping['fieldName'],
+                        $typeHint, ($settings['nullable'] ? 'null' : null), $settings['publicName'],
+                        $settings['singular'], $settings['otherSideMethodEnding']
+                    );
 
-                if($code) { $methods[] = $code; }
+                    if($code) { $methods[] = $code; }
+                }
             }
         }
 
@@ -329,26 +302,22 @@ trait <traitName>
         }
 
         $methods = implode("\n\n", $methods);
-        $methodDeps = ($hasBiDirectionalManyToMany) ? $this->spaces."use \\ERD\\DoctrineHelpersBundle\\Traits\\HasBidirectionalManyToMany;\n\n" : '';
+
+        //for simplicity's sake, just always dump in this trait. rather than only on
+        //($mapping['type']==ClassMetadataInfo::MANY_TO_MANY && (isset($mapping['mappedBy']) || isset($mapping['inversedBy']))
+        $methodDeps = $this->spaces."use \\ERD\\DoctrineHelpersBundle\\Traits\\HasBidirectionalManyToMany;\n\n";
 
         return $methodDeps.$methods;
     }
 
-    protected function generateAccessorMethod(ClassMetadataInfo $metadata, $type, $fieldName, $typeHint = null, $defaultValue = null, $publicName = null, $singular = null, $otherSideMethodEnding = null)
+    protected function generateAccessorMethod(ClassMetadataInfo $metadata, $type, $methodName, $fieldName, $typeHint = null, $defaultValue = null, $publicName = null, $singular = null, $otherSideMethodEnding = null)
     {
-        $useSingular = in_array($type, ["add", "remove"]);
-
-        if ($useSingular) {
-            $methodName = $type . Inflector::classify($singular);
-        } else {
-            $methodName = $type . Inflector::classify($publicName);
-        }
-
-        //skip methods which already exist (here or on a parent) or properties that were defined on a parent
-        if ($this->hasMethod($methodName, $metadata->name) || !$this->hasPropertyLocally($fieldName, $metadata->name)) {
+        if($this->hasMethod($methodName, $metadata->name))
+        {
             return;
         }
 
+        $useSingular = in_array($type, ["add", "remove"]);
         $this->staticReflection[$metadata->name]['methods'][] = $methodName;
 
         if(!$otherSideMethodEnding || $type=='get') {
@@ -366,10 +335,10 @@ trait <traitName>
         $bidirectionalSetMethods = "remove".$otherSideMethodEnding."', 'add".$otherSideMethodEnding;
 
         $replacements = array(
-            '<description>' => ucfirst($type) . ' ' . (($useSingular) ? $singular : $fieldName),
+            '<description>' => ucfirst($type) . ' ' . ($useSingular ? $singular : $publicName),
             '<methodTypeHint>' => $methodTypeHint,
             '<variableType>' => $variableType,
-            '<variableName>' => ($useSingular) ? Inflector::camelize($singular) : Inflector::camelize($fieldName),
+            '<variableName>' => ($useSingular) ? Inflector::camelize($singular) : Inflector::camelize($publicName),
             '<methodName>' => $methodName,
             '<fieldName>' => $fieldName,
             '<variableDefault>' => ($defaultValue !== null) ? (' = ' . $defaultValue) : '',
@@ -387,18 +356,24 @@ trait <traitName>
         return $this->prefixCodeWithSpaces($method);
     }
 
+    protected function getMethodNameForField($type, $publicName, $singular)
+    {
+        $useSingular = in_array($type, ["add", "remove"]);
+
+        if ($useSingular) {
+            $methodName = $type . Inflector::classify($singular);
+        } else {
+            $methodName = $type . Inflector::classify($publicName);
+        }
+
+        return $methodName;
+    }
     /**
      * Takes the mapping information associated with a given field and returns some basic settings about its accessor generation.
      */
     protected function getSettingsForField($mapping, $isAssociation, $metadata)
     {
-        $fieldName        = $mapping['fieldName'];
-        $annotationClass  = $this->annotationClass; //bc PHP can't parse $this->x::PUBLIC_CONSTANT.
-        //Find a property-level settings annotation, if present.
-        $fieldAnnotation = $this->reader->getPropertyAnnotation(
-        //read the visibility from the annotation, but override it for id fields, which don't need setters.
-
-           $metadata->generatorType != ClassMetadataInfo::GENERATOR_TYPE_NONE &&  //it's being set automatically and
+        //initialize some helpful variables
         $fieldName          = $mapping['fieldName'];
         $storesCollection   = ($isAssociation && ($mapping['type'] & ClassMetadataInfo::TO_MANY));
         $annotationClass    = $this->annotationClass; //bc PHP can't parse $this->x::PUBLIC_CONSTANT.
@@ -644,8 +619,8 @@ trait <traitName>
     {
         $lines = explode("\n", $code);
 
-        foreach ($lines as $key => $value) {
-            $lines[$key] = str_repeat($this->spaces, $num) . $lines[$key];
+        foreach ($lines as &$line) {
+            $line = str_repeat($this->spaces, $num) . $line;
         }
 
         return implode("\n", $lines);
