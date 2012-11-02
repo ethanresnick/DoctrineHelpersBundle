@@ -17,6 +17,7 @@ class GenerateAccessorsForExistingClassesCommand extends DoctrineCommand
             ->setDescription('From existing annotation-mapped classes, generates method stubs in a separate trait that\'s then used in each class')
             ->addArgument('name', InputArgument::REQUIRED, 'A bundle name, a namespace, or a class name')
             ->addOption('no-backup', null, InputOption::VALUE_NONE, 'Do not backup existing entities files.')
+            ->addOption('unlink', null, InputOption::VALUE_NONE, 'Unlinks previously-generated accessor traits from their entities, offering a sort of "undo".')
             ->setHelp(<<<EOT
 If you've already written a set of model classes and used annotations to map them,
 the standard <info>doctrine:generate:entities</info> command is almost useless.
@@ -121,7 +122,7 @@ EOT
         }
 
 
-        $generator = new \ERD\DoctrineHelpersBundle\Tools\AccessorGenerator(new \Doctrine\Common\Annotations\AnnotationReader(), $metadatas, ['backupExisting'=>$backupExisting]);
-        $generator->generate($entityMetadata->getPath(), $accessorsNS);
+        $generator = new \ERD\DoctrineHelpersBundle\Tools\AccessorGenerator(new \ERD\AnnotationHelpers\PowerReader(), $metadatas, ['backupExisting'=>$backupExisting]);
+        $generator->generate($entityMetadata->getPath(), $accessorsNS, $input->getOption('unlink'));
     }
 }

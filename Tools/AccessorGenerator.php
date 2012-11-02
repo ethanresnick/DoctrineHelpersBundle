@@ -334,7 +334,8 @@ trait <traitName>
         }
 
         $types = Type::getTypesMap();
-        $variableType = $typeHint ? $this->getType($typeHint) . ' ' : null;
+        $variableTypePrefix = !isset($types[$typeHint]) ? '\\' : ''; //we're dealing with an object variable type.
+        $variableType = $typeHint ? $variableTypePrefix.$this->getType($typeHint) . ' ' : null;
         $methodTypeHint = $typeHint && !isset($types[$typeHint]) ? '\\' . $typeHint . ' ' : null;
         $otherSideMethodEnding = Inflector::classify($otherSideMethodEnding);
         $bidirectionalSetMethods = "remove".$otherSideMethodEnding."', 'add".$otherSideMethodEnding;
