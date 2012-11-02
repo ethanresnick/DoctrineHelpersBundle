@@ -4,14 +4,14 @@ namespace ERD\DoctrineHelpersBundle\Tools;
 use Doctrine\ORM\Mapping\ClassMetadataInfo,
     Doctrine\Common\Util\Inflector,
     Doctrine\DBAL\Types\Type,
-    Doctrine\Common\Annotations\Reader;
+    ERD\AnnotationHelpers\PowerReader,
+    ERD\DoctrineHelpersBundle\Tools\Annotation\AccessorSettings;
 
 /**
- *
  * Generic class used to generate PHP5 entity stub methods from ClassMetadataInfo instances
  *
  * Largely duplicated from (but then highly simplified to remove unneeded options)
- * the version in \Doctrine\Tools, because I couldn't extend that since it used `private`.
+ * the generator in \Doctrine\Tools, because I couldn't extend that as it used `private`.
  */
 class AccessorGenerator
 {
@@ -56,7 +56,7 @@ class AccessorGenerator
     protected $annotationClass = 'ERD\DoctrineHelpersBundle\Tools\Annotation\AccessorSettings';
 
     /**
-     * @var Reader
+     * @var PowerReader
      */
     protected $reader;
 
@@ -166,7 +166,7 @@ trait <traitName>
      * @param array[ClassMetadataInfo] $metadatas The collection of ClassMetadataInfo instances to generate accessors for.
      * @param array An associative array of settings. Allowed keys are 'numSpaces', 'extension', and 'backupExisting'.
      */
-    public function __construct(Reader $reader, array $metadatas, array $settings)
+    public function __construct(PowerReader $reader, array $metadatas, array $settings)
     {
         $this->reader = $reader;
         $this->metadatas = $metadatas;
@@ -390,64 +390,114 @@ trait <traitName>
     /**
      * Takes the mapping information associated with a given field and returns some basic settings about its accessor generation.
      */
-    protected function getSettingsForField($mapping, $isAssociation, $metadata, $classAnnotation)
+    protected function getSettingsForField($mapping, $isAssociation, $metadata)
     {
         $fieldName        = $mapping['fieldName'];
-        $storesCollection = ($isAssociation && ($mapping['type'] & ClassMetadataInfo::TO_MANY));
         $annotationClass  = $this->annotationClass; //bc PHP can't parse $this->x::PUBLIC_CONSTANT.
-
         //Find a property-level settings annotation, if present.
-        //This will override the class-level annotation if both are present.
         $fieldAnnotation = $this->reader->getPropertyAnnotation(
-            new \ReflectionProperty($metadata->name, $fieldName),
-            $annotationClass);
-
         //read the visibility from the annotation, but override it for id fields, which don't need setters.
-        $visibility = ($fieldAnnotation!==null) ? $fieldAnnotation->visibility :
-                      (($classAnnotation!==null) ? $classAnnotation->visibility : $annotationClass::VISIBILITY_PUBLIC);
 
-        if(isset($mapping['id']) && $mapping['id'] &&                             //if the field is an id and
            $metadata->generatorType != ClassMetadataInfo::GENERATOR_TYPE_NONE &&  //it's being set automatically and
-           $visibility!=$annotationClass::VISIBILITY_PRIVATE)                     //it's not already private,
+        $fieldName          = $mapping['fieldName'];
+        $storesCollection   = ($isAssociation && ($mapping['type'] & ClassMetadataInfo::TO_MANY));
+        $annotationClass    = $this->annotationClass; //bc PHP can't parse $this->x::PUBLIC_CONSTANT.
+        $reflProp           = new \ReflectionProperty($metadata->name, $fieldName);
+        $declaringReflClass = $reflProp->getDeclaringClass();
+        $localReflClass     = new \ReflectionClass($metadata->name);
+
+        //get the merged annotation for this property from the class in which it was declared
+        $fieldAnnotations = $this->reader->getPropertyAnnotationsFromClass($reflProp, $declaringReflClass, $annotationClass);
+        $fieldAnnotation  = new AccessorSettings(array());
+        array_walk($fieldAnnotations, function($a) use ($fieldAnnotation) { $fieldAnnotation->mergeIn($a); });
+
+        //set up settings defaults
+        $singularDefault = self::singularify($fieldName);
+        $defaults = [
+            'visibility'           => $annotationClass::VISIBILITY_PUBLIC,
+            'otherSideMethodEnding'=> null,
+            'publicName'           => $fieldName,
+            'nullable'             => false,
+            'defaultTypeHint'      => $mapping['type'],
+            'singular'             => is_array($singularDefault) ? $singularDefault[0] : $singularDefault
+        ];
+
+        //using the getSetting() helper closure, merge the settings from the annotation with the defaults
+        //into a final $settings array, which we'll return.
+        $getSetting = function($name, $annotation, $condition = null, $successValue = null, $default = null) use ($defaults)
         {
-            //then make it read only so that it doesn't get a setter.
-            $visibility = $annotationClass::VISIBILITY_READONLY;
+            $condition = ($condition==null) ? ($annotation!==null && isset($annotation->{$name})) : $condition;
+
+            return ($condition) ? ($successValue ?: $annotation->{$name}) : ($default ?: $defaults[$name]);
+        };
+
+        $settings = [
+            //direct settings read from the annotation
+            'visibility'            => $getSetting('visibility', $fieldAnnotation),
+            'otherSideMethodEnding' => $getSetting('otherSideMethodEnding', $fieldAnnotation),
+            'publicName'            => $getSetting('publicName', $fieldAnnotation),
+            'singular'              => $getSetting('singular', $fieldAnnotation),
+
+            //settings dependent on whether we have an association/collection
+            'storesCollection'      => $storesCollection,
+            'nullable'              => ($isAssociation) ? (!$storesCollection && $this->isAssociationIsNullable($mapping)) : $defaults['nullable'],
+            'defaultTypeHint'       => ($isAssociation) ? $mapping['targetEntity'] : $defaults['defaultTypeHint'],
+
+            //settings we'll generate below.
+            'validAccessors'        => []
+        ];
+
+        //override the visibility setting for generated id fields, which can't have setters.
+        if(isset($mapping['id']) && $mapping['id'] &&
+           $metadata->generatorType != ClassMetadataInfo::GENERATOR_TYPE_NONE &&
+           $settings['visibility']!=$annotationClass::VISIBILITY_PRIVATE)
+        {
+            $settings['visibility'] = $annotationClass::VISIBILITY_READONLY;
         }
 
         //map visibility settings to the list of accessors to return
-        switch($visibility) {
-            case $annotationClass::VISIBILITY_PRIVATE:
-                $validAccessors = [];
-                break;
+        $settings['validAccessors'] = $this->getAccessorsForVisibility($settings['visibility'], $storesCollection);
 
-            case $annotationClass::VISIBILITY_READONLY:
-                $validAccessors = ['get'];
-                break;
+        /**
+         * We don't want to duplicate methods that we already added to trait associated with the parent
+         * class this property came from, so if it wasn't locally defined (as we've been assuming), we
+         * need to set the accessors that it's associated with back to an empty array, unless there's a
+         * local annotation that specifies that we should treat this property differently than we did in
+         * the parent class. So in this conditional, we unset the valid accessors, look for any local
+         * annotations (which would be class level, as we don't have the property here) and then diff them
+         * with the annotation pulled from where the property was defined, which is in $fieldAnnotation.
+         */
+        if(!$this->hasPropertyLocally($fieldName, $metadata->name))
+        {
+            $settings['validAccessors'] = array();
 
-            case $annotationClass::VISIBILITY_WRITEONLY:
-                $validAccessors = $storesCollection ? ['set', 'add','remove'] : ['set'];
-                break;
+            //the load the local annotations, which we'll parse for overrides
+            $localAnnotations = $this->reader->getClassLevelPropertyAnnotations($localReflClass, $fieldName, $annotationClass);
+            $localAnnotation = new AccessorSettings([]);
+            array_walk($localAnnotations, function($a) use ($localAnnotation) { $localAnnotation->mergeIn($a); });
 
-            case $annotationClass::VISIBILITY_PUBLIC:
-                $validAccessors = $storesCollection ? ['get','set','add','remove'] : ['get','set'];
-                break;
-            default:
-                $validAccessors = [];
+            if(count($localAnnotations)>0)
+            {
+                $localVisibility = $getSetting('visibility', $localAnnotation, null, null, $settings['visibility']);
+
+                //visibility can only be made more expansive, not more restrictive, as the parent classes will already
+                //have those less-restrictive accesors. So if we were private in the declaring class, our visibility can be
+                //set to anything here. And if we're public here, that's obviously more or equally expansive than/as any parent.
+                if($settings['visibility']!==$localVisibility && ($settings['visibility']==$annotationClass::VISIBILITY_PRIVATE || $localVisibility==$annotationClass::VISIBILITY_PUBLIC))
+                {
+                    $settings['visibility'] = $localVisibility;
+                    $settings['validAccessors'] = $this->getAccessorsForVisibility($localVisibility, $storesCollection);
+                }
+
+                //set the other annotation properties to the local values, falling back to the existing (i.e. parent) settings when there's no override.
+                $settings['otherSideMethodEnding'] = $getSetting('otherSideMethodEnding', $localAnnotation, null, null, $settings['otherSideMethodEnding']);
+                $settings['publicName']            = $getSetting('publicName', $localAnnotation, null, null, $settings['publicName']);
+                $settings['singular']              = $getSetting('singular', $localAnnotation, null, null, $settings['singular']);
+            }
+
         }
 
-        //generate the final collection of settings to return
-        $singular = ($fieldAnnotation!==null) ? $fieldAnnotation->singular : self::singularify($fieldName);
-        $singular = (is_array($singular)) ? $singular[0] : $singular;
-
-        $otherSideMethodEnding = ($fieldAnnotation!==null) ? $fieldAnnotation->otherSideMethodEnding : null;
-        $publicFieldName = ($fieldAnnotation!==null) ? $fieldAnnotation->publicName : $fieldName;
-
-        return [
-            'publicName' => $publicFieldName,
-            'validAccessors' => $validAccessors,
-            'singular' => $singular,
-            'otherSideMethodEnding' => $otherSideMethodEnding
-        ];
+        return $settings;
     }
 
     /**
@@ -473,6 +523,29 @@ trait <traitName>
         }
 
         return ($FCQN == $refl->getDeclaringClass()->getName());
+    }
+
+    protected function getAccessorsForVisibility($visibility, $storesCollection)
+    {
+        $annotationClass = $this->annotationClass;
+
+        switch($visibility)
+        {
+            case $annotationClass::VISIBILITY_PRIVATE:
+                return [];
+
+            case $annotationClass::VISIBILITY_READONLY:
+                return ['get'];
+
+            case $annotationClass::VISIBILITY_WRITEONLY:
+                return $storesCollection ? ['set', 'add','remove'] : ['set'];
+
+            case $annotationClass::VISIBILITY_PUBLIC:
+                return $storesCollection ? ['get','set','add','remove'] : ['get','set'];
+
+            default:
+                return [];
+        }
     }
 
     /**
