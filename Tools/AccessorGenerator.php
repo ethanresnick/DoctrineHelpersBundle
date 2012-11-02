@@ -179,9 +179,11 @@ trait <traitName>
      *
      * @param string $outputDirectory
      * @param string $accessorsNS The namespace for the generated accessors
+     * @param boolean $unlinkOnly Whether to unlink previously-generated accessor traits from
+     * their entities without replacing them with new ones.
      * @return void
      */
-    public function generate($outputDirectory, $accessorsNS)
+    public function generate($outputDirectory, $accessorsNS, $unlinkOnly = false)
     {
         $accessorsDir = $outputDirectory . DIRECTORY_SEPARATOR . str_replace('\\', DIRECTORY_SEPARATOR, $accessorsNS);
         foreach ($this->metadatas as $metadata) {
@@ -200,8 +202,11 @@ trait <traitName>
             //have to remove the trait first so that the new accessor trait doesn't see
             //methods from the old accessor trait as being defined.
             $this->removeAccessorTraitFromEntityClass($entityPath, $accessorsTraitName);
-            $this->writeAccessorTrait($metadata, $accessorsDir, $accessorsNS);
-            $this->addAccessorTraitToEntityClass($metadata, $entityPath, $accessorsTraitName);
+            if(!$unlinkOnly)
+            {
+                $this->writeAccessorTrait($metadata, $accessorsDir, $accessorsNS);
+                $this->addAccessorTraitToEntityClass($metadata, $entityPath, $accessorsTraitName);
+            }
         }
     }
 
