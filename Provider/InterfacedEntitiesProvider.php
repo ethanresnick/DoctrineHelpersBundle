@@ -14,7 +14,6 @@ class InterfacedEntitiesProvider implements DoctrineEntityProvider
 {
     /** @var Registry */
     protected $doctrineRegistry;
-    protected $reader;
 
     protected $interface;
 
@@ -27,8 +26,6 @@ class InterfacedEntitiesProvider implements DoctrineEntityProvider
     public function __construct(Registry $doctrineRegistry, $interface)
     {
         $this->doctrineRegistry = $doctrineRegistry;
-        $this->reader           = $reader;
-
         $this->interface = $interface;
     }
 
